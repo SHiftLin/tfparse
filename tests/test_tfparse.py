@@ -397,6 +397,13 @@ def test_parse_variables(tmp_path):
                     "line_end": 17,
                     "line_start": 1,
                     "path": "locals",
+                    "references": [
+                        {
+                            "id": ANY,
+                            "label": "local",
+                            "name": "list",
+                        }
+                    ],
                 },
                 "bool": True,
                 "complex": {
@@ -432,7 +439,14 @@ def test_parse_variables(tmp_path):
                     "label": "local_ref",
                     "line_end": 29,
                     "line_start": 27,
-                    "path": "variable.local_ref",
+                        "path": "variable.local_ref",
+                        "references": [
+                            {
+                                "id": ANY,
+                                "label": "local",
+                                "name": "bool",
+                            }
+                        ],
                 },
                 "default": True,
                 "id": ANY,
@@ -708,7 +722,7 @@ def test_not_wholly_known_foreach(tmp_path):
 
 def test_coalesce_with_data_references(tmp_path):
     """Test that coalesce function captures all references including data sources"""
-    mod_path = init_module("coalesce-test", tmp_path)
+    mod_path = init_module("coalesce", tmp_path)
     parsed = load_from_path(mod_path)
     
     # Get the S3 bucket resource
@@ -728,3 +742,36 @@ def test_coalesce_with_data_references(tmp_path):
     labels = {ref.get("label") for ref in references}
     assert "a" in labels, f"Should have reference to var.a, got labels: {labels}"
     assert "aws_caller_identity" in labels, f"Should have reference to data.aws_caller_identity.current, got labels: {labels}"
+
+
+def test_local_var_for_name_refs(tmp_path):
+    """Ensure locals referenced in resources are recorded with meaningful label/name."""
+    mod_path = init_module("local-var-for-name", tmp_path, run_init=False)
+    parsed = load_from_path(mod_path)
+
+    # resource that directly references a local
+    r1_list = parsed.get("azure-res-test1", [])
+    assert len(r1_list) == 1
+    r1 = r1_list[0]
+
+    refs1 = r1["__tfmeta"].get("references", [])
+    # find the locals reference and verify label/name and id match the locals block
+    locals_list = parsed.get("locals", [])
+    assert len(locals_list) >= 1
+    locals_block = locals_list[0]
+    locals_id = locals_block["id"]
+
+    found_local_ref = None
+    for r in refs1:
+        if r.get("label") == "local" and r.get("name") == "cosmosdb_account_name":
+            found_local_ref = r
+            break
+    assert found_local_ref is not None, f"expected local reference in {refs1}"
+    assert found_local_ref.get("id") == locals_id
+
+    # resource that references another resource which in turn referenced the local
+    r2_list = parsed.get("azure-res-test2", [])
+    assert len(r2_list) == 1
+    r2 = r2_list[0]
+    refs2 = r2["__tfmeta"].get("references", [])
+    assert any(r.get("label") == "azure-res-test1" and r.get("name") == "example1" for r in refs2)

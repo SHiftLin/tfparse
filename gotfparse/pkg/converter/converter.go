@@ -66,7 +66,26 @@ type referenceTracker struct {
 }
 
 func (r *referenceTracker) AddBlock(b *terraform.Block) {
-	r.blocksByReference[b.FullName()] = b
+	if b == nil {
+		return
+	}
+
+	// For non-locals blocks register by FullName as usual
+	if b.Type() != "locals" {
+		r.blocksByReference[b.FullName()] = b
+		return
+	}
+
+	// If this is a locals block, do NOT register the FullName key.
+	// Instead, register each top-level locals key as `locals.<key>` so
+	// lookups that include the local attribute name will match this block.
+	// Skip keys named "id".
+	for _, attr := range b.GetAttributes() {
+		name := attr.Name()
+		key := fmt.Sprintf("locals.%s", name)
+		r.blocksByReference[key] = b
+	}
+    
 }
 
 func (r *referenceTracker) AddBlockReferences(refs []string, blockMeta *map[string]any) {
@@ -82,10 +101,26 @@ func (r *referenceTracker) ProcessBlocksReferences() {
 		refsMeta := [](map[string]any){}
 		for _, ref := range blockRef.refs {
 			if block, ok := r.blocksByReference[ref]; ok {
+				// For locals, the reference string includes the attribute name
+				// (e.g., "locals.cosmosdb_account_name"). The locals block
+				// itself has no label/name in the same sense as resources, so
+				// map these values to something meaningful for downstream use.
+				var labelVal, nameVal string
+				if block.Type() == "locals" || strings.HasPrefix(ref, "locals.") {
+					labelVal = "local"
+					parts := strings.SplitN(ref, ".", 2)
+					if len(parts) == 2 {
+						nameVal = parts[1]
+					}
+				} else {
+					labelVal = block.TypeLabel()
+					nameVal = block.NameLabel()
+				}
+
 				meta := map[string]any{
 					"id":    block.ID(),
-					"label": block.TypeLabel(),
-					"name":  block.NameLabel(),
+					"label": labelVal,
+					"name":  nameVal,
 				}
 				refsMeta = append(refsMeta, meta)
 			}
@@ -177,8 +212,6 @@ func (t *terraformConverter) extractReferencesFromExpr(expr hcl.Expression, refs
 
 // extractBlockReference extracts the block-level reference from a traversal
 // For example:
-// extractBlockReference extracts the block-level reference from a traversal
-// For example:
 // - var.a -> variable.a
 // - data.aws_caller_identity.current.account_id -> data.aws_caller_identity.current
 // - local.x -> local.x
@@ -217,21 +250,26 @@ func (t *terraformConverter) extractBlockReference(ts hcl.Traversal) string {
 					return strings.Join(parts, ".")
 				}
 			} else if rootName == "local" {
-				// local references are local.NAME
-				// Once we have 2 parts (local, name), we can stop
+				// local references are local.NAME but the block is stored with key "locals"
+				// Once we have 2 parts (local, name), we can stop and return "locals" as the key
 				if len(parts) == 2 {
-					return strings.Join(parts, ".")
-				}
-			} else if rootName == "resource" {
-				// resource references are resource.TYPE.NAME
-				// Once we have 3 parts (resource, type, name), we can stop
-				if len(parts) == 3 {
-					return strings.Join(parts, ".")
+					return fmt.Sprintf("locals.%s", parts[1])
 				}
 			} else if rootName == "module" {
 				// module references are module.NAME
 				if len(parts) == 2 {
 					return strings.Join(parts, ".")
+				}
+			} else {
+				// If the traversal root is not one of the known keywords
+				// (var, data, local, module) it's most likely a resource
+				// type (for example `aws_instance.foo.attr`). In that case
+				// the block-level reference we want is `type.name` (first
+				// two parts) so return them when available.
+				if rootName != "" {
+					if len(parts) >= 2 {
+						return strings.Join(parts[:2], ".")
+					}
 				}
 			}
 		case hcl.TraverseIndex:
