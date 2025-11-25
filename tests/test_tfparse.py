@@ -720,13 +720,11 @@ def test_coalesce_with_data_references(tmp_path):
     
     # Check that references include both var and data
     references = bucket["__tfmeta"].get("references", [])
-    reference_ids = {ref["id"] for ref in references}
-    
-    # Should have references to both var.a and data.aws_caller_identity.current
-    var_refs = [ref for ref in references if "var" in ref.get("id", "")]
-    data_refs = [ref for ref in references if "data" in ref.get("id", "")]
     
     # Verify that we captured references from the coalesce function
     assert len(references) > 0, f"Should have references, got: {references}"
-    assert any("a" in str(ref.get("name", "")) for ref in references if "var" in ref.get("id", "")), \
-        "Should have reference to var.a"
+    
+    # Should have references to both var.a and data.aws_caller_identity.current
+    labels = {ref.get("label") for ref in references}
+    assert "a" in labels, f"Should have reference to var.a, got labels: {labels}"
+    assert "aws_caller_identity" in labels, f"Should have reference to data.aws_caller_identity.current, got labels: {labels}"
