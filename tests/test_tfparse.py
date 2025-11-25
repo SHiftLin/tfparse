@@ -775,3 +775,25 @@ def test_local_var_for_name_refs(tmp_path):
     r2 = r2_list[0]
     refs2 = r2["__tfmeta"].get("references", [])
     assert any(r.get("label") == "azure-res-test1" and r.get("name") == "example1" for r in refs2)
+
+
+def test_data_for_scopes(tmp_path):
+    """Ensure data sources referenced inside templates/lists are recorded."""
+    mod_path = init_module("data-for-scopes", tmp_path, run_init=False)
+    parsed = load_from_path(mod_path)
+
+    # find the data block
+    data_list = parsed.get("azurerm_client_config", [])
+    assert len(data_list) == 1
+    data_block = data_list[0]
+    data_id = data_block["id"]
+
+    # find the resource that uses the data in assignable_scopes
+    res_list = parsed.get("azurerm_cosmosdb_sql_role_definition", [])
+    assert len(res_list) == 1
+    res = res_list[0]
+
+    refs = res["__tfmeta"].get("references", [])
+    assert any(r.get("id") == data_id and r.get("label") == "azurerm_client_config" and r.get("name") == "current" for r in refs), (
+        f"expected reference to data.azurerm_client_config.current in {refs}"
+    )

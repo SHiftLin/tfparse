@@ -207,6 +207,21 @@ func (t *terraformConverter) extractReferencesFromExpr(expr hcl.Expression, refs
 	case *hclsyntax.SplatExpr:
 		// For splat expressions, process the source
 		t.extractReferencesFromExpr(e.Source, refs)
+	case *hclsyntax.TupleConsExpr:
+		// For tuple/list constructor expressions, process each element
+		for _, ex := range e.Exprs {
+			t.extractReferencesFromExpr(ex, refs)
+		}
+
+	case *hclsyntax.ObjectConsExpr:
+		// For object constructor expressions, process keys and values
+		for _, item := range e.Items {
+			t.extractReferencesFromExpr(item.KeyExpr, refs)
+			t.extractReferencesFromExpr(item.ValueExpr, refs)
+		}
+	case *hclsyntax.ParenthesesExpr:
+		// For grouped expressions, process the inner expression
+		t.extractReferencesFromExpr(e.Expression, refs)
 	}
 }
 
