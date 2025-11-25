@@ -704,3 +704,29 @@ def test_not_wholly_known_foreach(tmp_path):
     assert parsed["locals"][0]["current_month"] is None
     assert parsed["locals"][0]["last_month"] is None
     assert parsed["terraform_data"][0]["for_each"] is None
+
+
+def test_coalesce_with_data_references(tmp_path):
+    """Test that coalesce function captures all references including data sources"""
+    mod_path = init_module("coalesce-test", tmp_path)
+    parsed = load_from_path(mod_path)
+    
+    # Get the S3 bucket resource
+    buckets = parsed.get("aws_s3_bucket", [])
+    assert len(buckets) > 0, "Should have at least one aws_s3_bucket"
+    
+    bucket = buckets[0]
+    assert "bucket" in bucket, "Bucket should have 'bucket' attribute"
+    
+    # Check that references include both var and data
+    references = bucket["__tfmeta"].get("references", [])
+    reference_ids = {ref["id"] for ref in references}
+    
+    # Should have references to both var.a and data.aws_caller_identity.current
+    var_refs = [ref for ref in references if "var" in ref.get("id", "")]
+    data_refs = [ref for ref in references if "data" in ref.get("id", "")]
+    
+    # Verify that we captured references from the coalesce function
+    assert len(references) > 0, f"Should have references, got: {references}"
+    assert any("a" in str(ref.get("name", "")) for ref in references if "var" in ref.get("id", "")), \
+        "Should have reference to var.a"

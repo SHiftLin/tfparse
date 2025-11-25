@@ -119,6 +119,136 @@ func getPath(r *terraform.Reference) string {
 	return fmt.Sprintf("%s.%s", parent, r.String())
 }
 
+// extractReferencesFromExpr recursively extracts all ScopeTraversal references from an HCL expression
+// This ensures we capture references in all nested expressions, including function parameters
+func (t *terraformConverter) extractReferencesFromExpr(expr hcl.Expression, refs *stringSet) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *hclsyntax.FunctionCallExpr:
+		// For function calls, recursively process all arguments
+		for _, arg := range e.Args {
+			t.extractReferencesFromExpr(arg, refs)
+		}
+	case *hclsyntax.ScopeTraversalExpr:
+		// Extract the block-level reference path from the traversal
+		// For example:
+		// - var.a -> variable.a
+		// - data.aws_caller_identity.current.account_id -> data.aws_caller_identity.current
+		// - local.x -> local.x
+		blockRefPath := t.extractBlockReference(e.Traversal)
+		if blockRefPath != "" {
+			refs.Add(blockRefPath)
+		}
+	case *hclsyntax.TemplateExpr:
+		// For template expressions, process each part
+		for _, part := range e.Parts {
+			t.extractReferencesFromExpr(part, refs)
+		}
+	case *hclsyntax.ConditionalExpr:
+		// For conditional expressions, process all parts
+		t.extractReferencesFromExpr(e.Condition, refs)
+		t.extractReferencesFromExpr(e.TrueResult, refs)
+		t.extractReferencesFromExpr(e.FalseResult, refs)
+	case *hclsyntax.BinaryOpExpr:
+		// For binary operations, process both operands
+		t.extractReferencesFromExpr(e.LHS, refs)
+		t.extractReferencesFromExpr(e.RHS, refs)
+	case *hclsyntax.UnaryOpExpr:
+		// For unary operations, process the operand
+		t.extractReferencesFromExpr(e.Val, refs)
+	case *hclsyntax.ForExpr:
+		// For for expressions, process key, val, and result expressions
+		t.extractReferencesFromExpr(e.KeyExpr, refs)
+		t.extractReferencesFromExpr(e.ValExpr, refs)
+		t.extractReferencesFromExpr(e.CollExpr, refs)
+		t.extractReferencesFromExpr(e.CondExpr, refs)
+	case *hclsyntax.IndexExpr:
+		// For index expressions, process the collection and key
+		t.extractReferencesFromExpr(e.Collection, refs)
+		t.extractReferencesFromExpr(e.Key, refs)
+	case *hclsyntax.SplatExpr:
+		// For splat expressions, process the source
+		t.extractReferencesFromExpr(e.Source, refs)
+	}
+}
+
+// extractBlockReference extracts the block-level reference from a traversal
+// For example:
+// extractBlockReference extracts the block-level reference from a traversal
+// For example:
+// - var.a -> variable.a
+// - data.aws_caller_identity.current.account_id -> data.aws_caller_identity.current
+// - local.x -> local.x
+// - resource.type.name.attr -> resource.type.name
+func (t *terraformConverter) extractBlockReference(ts hcl.Traversal) string {
+	if len(ts) == 0 {
+		return ""
+	}
+
+	var parts []string
+	var rootName string
+	
+	for _, step := range ts {
+		switch s := step.(type) {
+		case hcl.TraverseRoot:
+			rootName = s.Name
+			parts = append(parts, s.Name)
+		case hcl.TraverseAttr:
+			parts = append(parts, s.Name)
+			
+			// For data and var references, we only need root + type (or root + name for variables)
+			// data.TYPE.NAME.attr -> data.TYPE.NAME
+			// var.NAME.attr -> variable.NAME
+			
+			if rootName == "var" {
+				// var references have exactly one attribute after var
+				// var.a means variable.a
+				if len(parts) == 2 {
+					// This is the variable name, we can stop here
+					return fmt.Sprintf("variable.%s", parts[1])
+				}
+			} else if rootName == "data" {
+				// data references are data.TYPE.NAME
+				// Once we have 3 parts (data, type, name), we can stop
+				if len(parts) == 3 {
+					return strings.Join(parts, ".")
+				}
+			} else if rootName == "local" {
+				// local references are local.NAME
+				// Once we have 2 parts (local, name), we can stop
+				if len(parts) == 2 {
+					return strings.Join(parts, ".")
+				}
+			} else if rootName == "resource" {
+				// resource references are resource.TYPE.NAME
+				// Once we have 3 parts (resource, type, name), we can stop
+				if len(parts) == 3 {
+					return strings.Join(parts, ".")
+				}
+			} else if rootName == "module" {
+				// module references are module.NAME
+				if len(parts) == 2 {
+					return strings.Join(parts, ".")
+				}
+			}
+		case hcl.TraverseIndex:
+			// Indexed access like [0] - this indicates we're accessing a specific item
+			// This is an attribute, so we should stop building the block reference
+			break
+		}
+	}
+
+	// Fallback: return what we have constructed
+	if len(parts) > 0 {
+		return strings.Join(parts, ".")
+	}
+	
+	return ""
+}
+
 type terraformConverter struct {
 	filePath         string
 	modules          terraform.Modules
@@ -253,6 +383,14 @@ func (t *terraformConverter) buildBlock(b *terraform.Block) map[string]interface
 
 		for _, ref := range a.AllReferences() {
 			allRefs.Add(getPath(ref))
+		}
+		
+		// Additionally, extract any references from function call expressions
+		// This ensures we capture all references, including those in function parameters
+		// (e.g., coalesce(var.a, data.b) should include references to both var and data)
+		hclAttr := getPrivateValue(a, "hclAttribute").(*hcl.Attribute)
+		if hclAttr != nil && hclAttr.Expr != nil {
+			t.extractReferencesFromExpr(hclAttr.Expr, &allRefs)
 		}
 	}
 
