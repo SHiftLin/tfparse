@@ -85,7 +85,7 @@ func (r *referenceTracker) AddBlock(b *terraform.Block) {
 		key := fmt.Sprintf("locals.%s", name)
 		r.blocksByReference[key] = b
 	}
-    
+
 }
 
 func (r *referenceTracker) AddBlockReferences(refs []string, blockMeta *map[string]any) {
@@ -182,6 +182,10 @@ func (t *terraformConverter) extractReferencesFromExpr(expr hcl.Expression, refs
 		for _, part := range e.Parts {
 			t.extractReferencesFromExpr(part, refs)
 		}
+	case *hclsyntax.TemplateWrapExpr:
+		// TemplateWrapExpr wraps an expression for compatibility with template syntax
+		// Unwrap and process the wrapped expression
+		t.extractReferencesFromExpr(e.Wrapped, refs)
 	case *hclsyntax.ConditionalExpr:
 		// For conditional expressions, process all parts
 		t.extractReferencesFromExpr(e.Condition, refs)
@@ -229,8 +233,9 @@ func (t *terraformConverter) extractReferencesFromExpr(expr hcl.Expression, refs
 // For example:
 // - var.a -> variable.a
 // - data.aws_caller_identity.current.account_id -> data.aws_caller_identity.current
-// - local.x -> local.x
+// - local.x -> locals.x
 // - resource.type.name.attr -> resource.type.name
+// - resource.type.name[0].attr -> resource.type.name (strips index and attributes)
 func (t *terraformConverter) extractBlockReference(ts hcl.Traversal) string {
 	if len(ts) == 0 {
 		return ""
@@ -289,8 +294,17 @@ func (t *terraformConverter) extractBlockReference(ts hcl.Traversal) string {
 			}
 		case hcl.TraverseIndex:
 			// Indexed access like [0] - this indicates we're accessing a specific item
-			// This is an attribute, so we should stop building the block reference
-			break
+			// Once we encounter an index, we've reached the block-level reference
+			// Stop here and return what we have collected so far
+			// For example: kubernetes_service_account.tiller[0].name -> kubernetes_service_account.tiller
+			if len(parts) >= 2 {
+				// For resources, return type.name
+				if rootName != "var" && rootName != "data" && rootName != "local" && rootName != "module" {
+					return strings.Join(parts[:2], ".")
+				}
+			}
+			// For other cases, return what we have
+			return strings.Join(parts, ".")
 		}
 	}
 
@@ -438,9 +452,11 @@ func (t *terraformConverter) buildBlock(b *terraform.Block) map[string]interface
 			allRefs.Add(getPath(ref))
 		}
 		
-		// Additionally, extract any references from function call expressions
-		// This ensures we capture all references, including those in function parameters
-		// (e.g., coalesce(var.a, data.b) should include references to both var and data)
+		// Additionally, extract references from the attribute's HCL expression tree
+		// This ensures we capture all references, including:
+		// 1. References in function call expressions (e.g., coalesce(var.a, data.b) should include both var and data)
+		// 2. Block-level references by stripping indices and attributes (e.g., kubernetes_service_account.tiller[0].name -> kubernetes_service_account.tiller)
+		// 3. References in template expressions and other complex HCL constructs
 		hclAttr := getPrivateValue(a, "hclAttribute").(*hcl.Attribute)
 		if hclAttr != nil && hclAttr.Expr != nil {
 			t.extractReferencesFromExpr(hclAttr.Expr, &allRefs)

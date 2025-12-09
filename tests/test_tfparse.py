@@ -797,3 +797,27 @@ def test_data_for_scopes(tmp_path):
     assert any(r.get("id") == data_id and r.get("label") == "azurerm_client_config" and r.get("name") == "current" for r in refs), (
         f"expected reference to data.azurerm_client_config.current in {refs}"
     )
+
+
+def test_nested_ref_with_index(tmp_path):
+    """Test that references with array indices are correctly extracted as block-level references"""
+    mod_path = init_module("nested_ref", tmp_path, run_init=False)
+    parsed = load_from_path(mod_path)
+
+    service_account = parsed["kubernetes_service_account"][0]
+    role_binding = parsed["kubernetes_cluster_role_binding"][0]
+
+    # Check that metadata block has reference to service account
+    metadata_refs = role_binding["metadata"]["__tfmeta"]["references"]
+    assert len(metadata_refs) == 1
+    assert metadata_refs[0]["id"] == service_account["id"]
+    assert metadata_refs[0]["label"] == "kubernetes_service_account"
+    assert metadata_refs[0]["name"] == "tiller"
+
+    # Check that subject block has reference to service account
+    subject_refs = role_binding["subject"]["__tfmeta"]["references"]
+    assert len(subject_refs) == 1
+    assert subject_refs[0]["id"] == service_account["id"]
+    assert subject_refs[0]["label"] == "kubernetes_service_account"
+    assert subject_refs[0]["name"] == "tiller"
+
